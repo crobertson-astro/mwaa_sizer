@@ -11,3 +11,6 @@ wheels/
 
 # Output csvs
 *.csv
+
+# MacOS files
+.DS_Store

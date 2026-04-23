@@ -19,24 +19,24 @@ uv sync
 
 **Single account (current credentials):**
 ```bash
-uv run python mwaa_sizer.py --single-account
+uv run python main.py --single-account
 ```
 
 **All accounts in an AWS org:**
 ```bash
-uv run python mwaa_sizer.py --role OrganizationAccountAccessRole
+uv run python main.py --role OrganizationAccountAccessRole
 ```
 
 **Specific accounts or regions:**
 ```bash
-uv run python mwaa_sizer.py \
+uv run python main.py \
   --accounts 123456789012 987654321098 \
   --regions us-east-1 us-west-2
 ```
 
 **Higher granularity (14 days at 1-minute resolution):**
 ```bash
-uv run python mwaa_sizer.py --single-account --hours 336 --period 60
+uv run python main.py --single-account --hours 336 --period 60
 ```
 
 ## Options

@@ -7,7 +7,7 @@ collects CloudWatch usage metrics (AWS/MWAA namespace) over the last 30 days,
 and writes a CSV report to support right-sizing decisions.
 
 Usage:
-    python mwaa_sizer.py [--role ROLE] [--profile PROFILE] [--regions ...] \
+    python main.py [--role ROLE] [--profile PROFILE] [--regions ...] \
                          [--accounts ...] [--hours N] [--period N] \
                          [--output FILE] [--single-account] [-v]
 
