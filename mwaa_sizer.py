@@ -13,7 +13,7 @@ Usage:
 
 CloudWatch retention note:
     30 days falls in the 15-63 day window, so period must be >= 300 s.
-    Default is 3600 s (1 hour) to keep datapoint counts manageable.
+    Use --hours 336 --period 60 to get 14 days at 1-minute granularity instead.
 """
 
 from __future__ import annotations
@@ -43,8 +43,8 @@ MWAA_REGIONS: list[str] = [
 ]
 
 CW_NAMESPACE = "AWS/MWAA"
-DEFAULT_HOURS = 720   # 30 days
-DEFAULT_PERIOD = 3600  # 1-hour buckets (valid for the 15-63 day retention window)
+DEFAULT_HOURS = 720   # 30 days — within the 63-day 5-minute retention window
+DEFAULT_PERIOD = 300  # 5-minute buckets — finest granularity available for 30-day window
 
 
 CSV_HEADERS = [
@@ -197,24 +197,38 @@ def _avg_metric(
     period: int,
 ) -> float | None:
     now = datetime.datetime.now(datetime.timezone.utc)
+    kwargs: dict = {
+        "MetricDataQueries": [{
+            "Id": "m1",
+            "MetricStat": {
+                "Metric": {
+                    "Namespace": CW_NAMESPACE,
+                    "MetricName": metric_name,
+                    "Dimensions": [
+                        {"Name": "Environment", "Value": env_name},
+                        {"Name": "Cluster",     "Value": cluster},
+                    ],
+                },
+                "Period": period,
+                "Stat": stat,
+            },
+        }],
+        "StartTime": now - datetime.timedelta(hours=hours),
+        "EndTime": now,
+    }
+    values: list[float] = []
     try:
-        resp = cw.get_metric_statistics(
-            Namespace=CW_NAMESPACE,
-            MetricName=metric_name,
-            Dimensions=[
-                {"Name": "Environment", "Value": env_name},
-                {"Name": "Cluster",     "Value": cluster},
-            ],
-            StartTime=now - datetime.timedelta(hours=hours),
-            EndTime=now,
-            Period=period,
-            Statistics=[stat],
-        )
-        values = [dp[stat] for dp in resp["Datapoints"]]
-        return round(sum(values) / len(values), 2) if values else None
+        while True:
+            resp = cw.get_metric_data(**kwargs)
+            values.extend(resp["MetricDataResults"][0]["Values"])
+            if next_token := resp.get("NextToken"):
+                kwargs["NextToken"] = next_token
+            else:
+                break
     except ClientError as e:
         log.warning("Could not get %s/%s for %s: %s", cluster, metric_name, env_name, e)
         return None
+    return round(sum(values) / len(values), 2) if values else None
 
 
 def collect_environment_metrics(
@@ -229,9 +243,8 @@ def collect_environment_metrics(
         return _avg_metric(cw, env_name, "MemoryUtilization", "Average", cluster, hours, period)
 
     def count(cluster: str) -> float | None:
+        # SampleCount = containers × (period / 60) because each container emits once per minute.
         raw = _avg_metric(cw, env_name, "CPUUtilization", "SampleCount", cluster, hours, period)
-        # SampleCount aggregates one sample/minute/container over the period bucket,
-        # so dividing by (period / 60) converts it back to a container count.
         return round(raw / (period / 60), 2) if raw is not None else None
 
     return EnvironmentMetrics(
