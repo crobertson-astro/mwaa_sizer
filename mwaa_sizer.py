@@ -41,22 +41,38 @@ MWAA_REGIONS = [
 
 DEFAULT_HOURS = 720   # 30 days
 DEFAULT_PERIOD = 3600  # 1-hour granularity (valid for 15-63 day window)
-NAMESPACE = "AmazonMWAA"
+
+# Airflow-emitted metrics live under AmazonMWAA (tasks, heartbeat, parse time).
+# Container-level CPU/Memory live under AWS/MWAA with a Cluster dimension.
+AIRFLOW_NAMESPACE = "AmazonMWAA"
+CONTAINER_NAMESPACE = "AWS/MWAA"
 
 CSV_HEADERS = [
     "AccountId", "AccountName", "Region", "EnvironmentName",
     "Status", "AirflowVersion", "EnvironmentClass",
     "SchedulerCount", "MinWorkers", "MaxWorkers",
+    # Airflow-level metrics (AmazonMWAA / Environment dimension)
     "WorkerCount_Avg", "WorkerCount_Max", "WorkerCount_P95",
     "RunningTasks_Avg", "RunningTasks_Max",
     "QueuedTasks_Avg", "QueuedTasks_Max",
     "SchedulerHeartbeat_Avg",
     "TotalParseTime_Avg_s", "TotalParseTime_Max_s",
-    "WorkerCPU_Avg_%", "WorkerCPU_Max_%", "WorkerCPU_P95_%",
-    "WorkerMemory_Avg_%", "WorkerMemory_Max_%", "WorkerMemory_P95_%",
+    # Live instance counts from SampleCount of CPUUtilization (AWS/MWAA)
+    "BaseWorkerCount_Avg", "BaseWorkerCount_Max",
+    "AdditionalWorkerCount_Avg", "AdditionalWorkerCount_Max",
+    "SchedulerActiveCount_Avg", "SchedulerActiveCount_Max",
+    # BaseWorker CPU / Memory (AWS/MWAA, Cluster=BaseWorker)
+    "BaseWorkerCPU_Avg_%", "BaseWorkerCPU_Max_%", "BaseWorkerCPU_P95_%",
+    "BaseWorkerMemory_Avg_%", "BaseWorkerMemory_Max_%", "BaseWorkerMemory_P95_%",
+    # AdditionalWorker CPU / Memory (AWS/MWAA, Cluster=AdditionalWorker)
+    "AdditionalWorkerCPU_Avg_%", "AdditionalWorkerCPU_Max_%", "AdditionalWorkerCPU_P95_%",
+    "AdditionalWorkerMemory_Avg_%", "AdditionalWorkerMemory_Max_%", "AdditionalWorkerMemory_P95_%",
+    # Scheduler CPU / Memory (AWS/MWAA, Cluster=Scheduler)
     "SchedulerCPU_Avg_%", "SchedulerCPU_Max_%",
     "SchedulerMemory_Avg_%", "SchedulerMemory_Max_%",
-    "WebserverCPU_Avg_%", "WebserverCPU_Max_%",
+    # WebServer CPU / Memory (AWS/MWAA, Cluster=WebServer)
+    "WebServerCPU_Avg_%", "WebServerCPU_Max_%",
+    "WebServerMemory_Avg_%", "WebServerMemory_Max_%",
 ]
 
 
@@ -142,14 +158,14 @@ def _summarize(values):
     }
 
 
-def get_metric(cw, env_name, metric_name, stat, hours, period, function=None):
+def get_metric(cw, namespace, env_name, metric_name, stat, hours, period, cluster=None):
     now = datetime.datetime.now(datetime.timezone.utc)
     dimensions = [{"Name": "Environment", "Value": env_name}]
-    if function:
-        dimensions.append({"Name": "Function", "Value": function})
+    if cluster:
+        dimensions.append({"Name": "Cluster", "Value": cluster})
     try:
         resp = cw.get_metric_statistics(
-            Namespace=NAMESPACE,
+            Namespace=namespace,
             MetricName=metric_name,
             Dimensions=dimensions,
             StartTime=now - datetime.timedelta(hours=hours),
@@ -166,20 +182,35 @@ def get_metric(cw, env_name, metric_name, stat, hours, period, function=None):
 def collect_metrics(session, region, env_name, hours, period):
     cw = session.client("cloudwatch", region_name=region)
 
-    def m(metric, stat, function=None):
-        return get_metric(cw, env_name, metric, stat, hours, period, function)
+    def airflow(metric, stat):
+        return get_metric(cw, AIRFLOW_NAMESPACE, env_name, metric, stat, hours, period)
+
+    def container(metric, stat, cluster):
+        return get_metric(cw, CONTAINER_NAMESPACE, env_name, metric, stat, hours, period, cluster)
 
     return {
-        "worker_count": m("WorkerCount", "Average"),
-        "running":      m("RunningTasks", "Average"),
-        "queued":       m("QueuedTasks", "Maximum"),
-        "heartbeat":    m("SchedulerHeartbeat", "Average"),
-        "parse_time":   m("TotalParseTime", "Average"),
-        "worker_cpu":   m("CPUUtilization", "Average", "worker"),
-        "worker_mem":   m("MemoryAllocatableUtilization", "Average", "worker"),
-        "sched_cpu":    m("CPUUtilization", "Average", "scheduler"),
-        "sched_mem":    m("MemoryAllocatableUtilization", "Average", "scheduler"),
-        "web_cpu":      m("CPUUtilization", "Average", "webserver"),
+        # Airflow-level metrics
+        "worker_count": airflow("WorkerCount", "Average"),
+        "running":      airflow("RunningTasks", "Average"),
+        "queued":       airflow("QueuedTasks", "Maximum"),
+        "heartbeat":    airflow("SchedulerHeartbeat", "Average"),
+        "parse_time":   airflow("TotalParseTime", "Average"),
+        # Instance counts via SampleCount of CPUUtilization (AWS/MWAA)
+        "base_worker_count":       container("CPUUtilization", "SampleCount", "BaseWorker"),
+        "additional_worker_count": container("CPUUtilization", "SampleCount", "AdditionalWorker"),
+        "scheduler_active_count":  container("CPUUtilization", "SampleCount", "Scheduler"),
+        # BaseWorker CPU / Memory
+        "base_worker_cpu": container("CPUUtilization",    "Average", "BaseWorker"),
+        "base_worker_mem": container("MemoryUtilization", "Average", "BaseWorker"),
+        # AdditionalWorker CPU / Memory
+        "add_worker_cpu": container("CPUUtilization",    "Average", "AdditionalWorker"),
+        "add_worker_mem": container("MemoryUtilization", "Average", "AdditionalWorker"),
+        # Scheduler CPU / Memory
+        "sched_cpu": container("CPUUtilization",    "Average", "Scheduler"),
+        "sched_mem": container("MemoryUtilization", "Average", "Scheduler"),
+        # WebServer CPU / Memory
+        "web_cpu": container("CPUUtilization",    "Average", "WebServer"),
+        "web_mem": container("MemoryUtilization", "Average", "WebServer"),
     }
 
 
@@ -188,16 +219,22 @@ def collect_metrics(session, region, env_name, hours, period):
 # ---------------------------------------------------------------------------
 
 def build_row(account_id, account_name, region, details, mx):
-    wc = mx["worker_count"]
-    rn = mx["running"]
-    qu = mx["queued"]
-    hb = mx["heartbeat"]
-    pt = mx["parse_time"]
-    wcpu = mx["worker_cpu"]
-    wmem = mx["worker_mem"]
+    wc   = mx["worker_count"]
+    rn   = mx["running"]
+    qu   = mx["queued"]
+    hb   = mx["heartbeat"]
+    pt   = mx["parse_time"]
+    bwc  = mx["base_worker_count"]
+    awc  = mx["additional_worker_count"]
+    sac  = mx["scheduler_active_count"]
+    bcpu = mx["base_worker_cpu"]
+    bmem = mx["base_worker_mem"]
+    acpu = mx["add_worker_cpu"]
+    amem = mx["add_worker_mem"]
     scpu = mx["sched_cpu"]
     smem = mx["sched_mem"]
     xcpu = mx["web_cpu"]
+    xmem = mx["web_mem"]
 
     return [
         account_id, account_name, region,
@@ -209,11 +246,17 @@ def build_row(account_id, account_name, region, details, mx):
         qu["avg"],   qu["max"],
         hb["avg"],
         pt["avg"],   pt["max"],
-        wcpu["avg"], wcpu["max"], wcpu["p95"],
-        wmem["avg"], wmem["max"], wmem["p95"],
+        bwc["avg"],  bwc["max"],
+        awc["avg"],  awc["max"],
+        sac["avg"],  sac["max"],
+        bcpu["avg"], bcpu["max"], bcpu["p95"],
+        bmem["avg"], bmem["max"], bmem["p95"],
+        acpu["avg"], acpu["max"], acpu["p95"],
+        amem["avg"], amem["max"], amem["p95"],
         scpu["avg"], scpu["max"],
         smem["avg"], smem["max"],
         xcpu["avg"], xcpu["max"],
+        xmem["avg"], xmem["max"],
     ]
 
 
@@ -248,8 +291,8 @@ def main():
              "Must be >= 300 for data older than 15 days.",
     )
     parser.add_argument(
-        "--output", default="mwaa_usage.csv",
-        help="Output CSV file (default: mwaa_usage.csv)",
+        "--output", default=None,
+        help="Output CSV file (default: mwaa_usage_YYYYMMDD_HHMMSS.csv)",
     )
     parser.add_argument(
         "--single-account", action="store_true",
@@ -260,6 +303,9 @@ def main():
 
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
+
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    output = args.output or f"mwaa_usage_{ts}.csv"
 
     session_kwargs = {"profile_name": args.profile} if args.profile else {}
     root_session = boto3.Session(**session_kwargs)
@@ -288,7 +334,7 @@ def main():
         log.info("Found %d account(s) to scan", len(accounts_to_scan))
 
     rows_written = 0
-    with open(args.output, "w", newline="") as csvfile:
+    with open(output, "w", newline="") as csvfile:
         writer = csv.writer(csvfile, delimiter=",", quotechar='"', quoting=csv.QUOTE_MINIMAL)
         writer.writerow(CSV_HEADERS)
 
@@ -321,8 +367,8 @@ def main():
                     writer.writerow(build_row(account_id, account_name, region, details, metrics))
                     rows_written += 1
 
-    log.info("Done. %d environment(s) written to %s", rows_written, args.output)
-    print(f"Report: {args.output} ({rows_written} environment(s))")
+    log.info("Done. %d environment(s) written to %s", rows_written, output)
+    print(f"Report: {output} ({rows_written} environment(s))")
 
 
 if __name__ == "__main__":
